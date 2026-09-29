@@ -3604,62 +3604,14 @@ static int get_subsystem_type(const char *device_path)
 }
 #endif
 
-static int drmParseSubsystemType(int maj, int min)
-{
-#ifdef __linux__
-    char path[PATH_MAX + 1] = "";
-    char real_path[PATH_MAX + 1] = "";
-    int subsystem_type;
-
-    snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
-
-    subsystem_type = get_subsystem_type(path);
-    /* Try to get the parent (underlying) device type */
-    if (subsystem_type == DRM_BUS_VIRTIO) {
-        /* Assume virtio-pci on error */
-        if (!realpath(path, real_path))
-            return DRM_BUS_VIRTIO;
-        strncat(path, "/..", PATH_MAX);
-        subsystem_type = get_subsystem_type(path);
-        if (subsystem_type < 0)
-            return DRM_BUS_VIRTIO;
-     }
-    return subsystem_type;
-#elif defined(__OpenBSD__) || defined(__DragonFly__) || defined(__FreeBSD__)
-    return DRM_BUS_PCI;
-#else
-#warning "Missing implementation of drmParseSubsystemType"
-    return -EINVAL;
-#endif
-}
-
-#ifdef __linux__
-static void
-get_pci_path(int maj, int min, char *pci_path)
-{
-    char path[PATH_MAX + 1], *term;
-
-    snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
-    if (!realpath(path, pci_path)) {
-        strcpy(pci_path, path);
-        return;
-    }
-
-    term = strrchr(pci_path, '/');
-    if (term && strncmp(term, "/virtio", 7) == 0)
-        *term = 0;
-}
-#endif
-
 #ifdef __FreeBSD__
-static int get_sysctl_pci_bus_info(int maj, int min, drmPciBusInfoPtr info)
+/* The bus ID the kernel gives the device of a node, from hw.dri.N.busid. */
+static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
 {
     char dname[SPECNAMELEN];
     char sysctl_name[16];
-    char sysctl_val[256];
-    size_t sysctl_len;
-    int id, type, nelem;
-    unsigned int rdev, majmin, domain, bus, dev, func;
+    int id, type;
+    unsigned int rdev;
 
     rdev = makedev(maj, min);
     if (!devname_r(rdev, S_IFCHR, dname, sizeof(dname)))
@@ -3690,8 +3642,79 @@ static int get_sysctl_pci_bus_info(int maj, int min, drmPciBusInfoPtr info)
 
     if (snprintf(sysctl_name, sizeof(sysctl_name), "hw.dri.%d.busid", id) <= 0)
       return -EINVAL;
-    sysctl_len = sizeof(sysctl_val);
-    if (sysctlbyname(sysctl_name, sysctl_val, &sysctl_len, NULL, 0))
+    if (sysctlbyname(sysctl_name, busid, &len, NULL, 0))
+      return -EINVAL;
+
+    return 0;
+}
+
+#define FREEBSD_PLATFORM_BUSID "platform:"
+#endif
+
+static int drmParseSubsystemType(int maj, int min)
+{
+#ifdef __linux__
+    char path[PATH_MAX + 1] = "";
+    char real_path[PATH_MAX + 1] = "";
+    int subsystem_type;
+
+    snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
+
+    subsystem_type = get_subsystem_type(path);
+    /* Try to get the parent (underlying) device type */
+    if (subsystem_type == DRM_BUS_VIRTIO) {
+        /* Assume virtio-pci on error */
+        if (!realpath(path, real_path))
+            return DRM_BUS_VIRTIO;
+        strncat(path, "/..", PATH_MAX);
+        subsystem_type = get_subsystem_type(path);
+        if (subsystem_type < 0)
+            return DRM_BUS_VIRTIO;
+     }
+    return subsystem_type;
+#elif defined(__FreeBSD__)
+    char busid[256];
+
+    /* Drivers of devices that are not on PCI use "platform:<name>". */
+    if (get_sysctl_busid(maj, min, busid, sizeof(busid)) == 0 &&
+        strncmp(busid, FREEBSD_PLATFORM_BUSID,
+                strlen(FREEBSD_PLATFORM_BUSID)) == 0)
+        return DRM_BUS_PLATFORM;
+    return DRM_BUS_PCI;
+#elif defined(__OpenBSD__) || defined(__DragonFly__)
+    return DRM_BUS_PCI;
+#else
+#warning "Missing implementation of drmParseSubsystemType"
+    return -EINVAL;
+#endif
+}
+
+#ifdef __linux__
+static void
+get_pci_path(int maj, int min, char *pci_path)
+{
+    char path[PATH_MAX + 1], *term;
+
+    snprintf(path, sizeof(path), "/sys/dev/char/%d:%d/device", maj, min);
+    if (!realpath(path, pci_path)) {
+        strcpy(pci_path, path);
+        return;
+    }
+
+    term = strrchr(pci_path, '/');
+    if (term && strncmp(term, "/virtio", 7) == 0)
+        *term = 0;
+}
+#endif
+
+#ifdef __FreeBSD__
+static int get_sysctl_pci_bus_info(int maj, int min, drmPciBusInfoPtr info)
+{
+    char sysctl_val[256];
+    int nelem;
+    unsigned int domain, bus, dev, func;
+
+    if (get_sysctl_busid(maj, min, sysctl_val, sizeof(sysctl_val)))
       return -EINVAL;
 
     #define bus_fmt "pci:%04x:%02x:%02x.%u"
@@ -4305,6 +4328,20 @@ static int drmParseOFBusInfo(int maj, int min, char *fullname)
     free(name);
 
     return 0;
+#elif defined(__FreeBSD__)
+    char busid[256];
+
+    /* Like Linux without OF data: the name from "platform:<name>". */
+    if (get_sysctl_busid(maj, min, busid, sizeof(busid)) ||
+        strncmp(busid, FREEBSD_PLATFORM_BUSID,
+                strlen(FREEBSD_PLATFORM_BUSID)) != 0)
+        return -ENOENT;
+
+    strncpy(fullname, busid + strlen(FREEBSD_PLATFORM_BUSID),
+            DRM_PLATFORM_DEVICE_NAME_LEN);
+    fullname[DRM_PLATFORM_DEVICE_NAME_LEN - 1] = '\0';
+
+    return 0;
 #else
 #warning "Missing implementation of drmParseOFBusInfo"
     return -EINVAL;
@@ -4365,6 +4402,25 @@ free:
 
     free(*compatible);
     return err;
+#elif defined(__FreeBSD__)
+    char name[DRM_PLATFORM_DEVICE_NAME_LEN];
+    int err;
+
+    /* Like Linux without OF data: one entry, the device's name. */
+    err = drmParseOFBusInfo(maj, min, name);
+    if (err)
+        return err;
+
+    *compatible = calloc(2, sizeof(char *));
+    if (!*compatible)
+        return -ENOMEM;
+    (*compatible)[0] = strdup(name);
+    if (!(*compatible)[0]) {
+        free(*compatible);
+        return -ENOMEM;
+    }
+
+    return 0;
 #else
 #warning "Missing implementation of drmParseOFDeviceInfo"
     return -EINVAL;
