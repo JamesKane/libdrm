@@ -3663,7 +3663,22 @@ static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
     return 0;
 }
 
-#define FREEBSD_PLATFORM_BUSID "platform:"
+/*
+ * Drivers of devices that are not on PCI give the bus ID "platform:<name>":
+ * get the name, if the node's device is one.
+ */
+static int get_sysctl_platform_name(int maj, int min, char *name, size_t len)
+{
+    static const char prefix[] = "platform:";
+    char busid[256];
+
+    if (get_sysctl_busid(maj, min, busid, sizeof(busid)) ||
+        strncmp(busid, prefix, strlen(prefix)) != 0)
+        return -ENOENT;
+    strncpy(name, busid + strlen(prefix), len);
+    name[len - 1] = '\0';
+    return 0;
+}
 #endif
 
 static int drmParseSubsystemType(int maj, int min)
@@ -3688,12 +3703,9 @@ static int drmParseSubsystemType(int maj, int min)
      }
     return subsystem_type;
 #elif defined(__FreeBSD__)
-    char busid[256];
+    char name[DRM_PLATFORM_DEVICE_NAME_LEN];
 
-    /* Drivers of devices that are not on PCI use "platform:<name>". */
-    if (get_sysctl_busid(maj, min, busid, sizeof(busid)) == 0 &&
-        strncmp(busid, FREEBSD_PLATFORM_BUSID,
-                strlen(FREEBSD_PLATFORM_BUSID)) == 0)
+    if (get_sysctl_platform_name(maj, min, name, sizeof(name)) == 0)
         return DRM_BUS_PLATFORM;
     return DRM_BUS_PCI;
 #elif defined(__OpenBSD__) || defined(__DragonFly__)
@@ -4344,19 +4356,9 @@ static int drmParseOFBusInfo(int maj, int min, char *fullname)
 
     return 0;
 #elif defined(__FreeBSD__)
-    char busid[256];
-
-    /* Like Linux without OF data: the name from "platform:<name>". */
-    if (get_sysctl_busid(maj, min, busid, sizeof(busid)) ||
-        strncmp(busid, FREEBSD_PLATFORM_BUSID,
-                strlen(FREEBSD_PLATFORM_BUSID)) != 0)
-        return -ENOENT;
-
-    strncpy(fullname, busid + strlen(FREEBSD_PLATFORM_BUSID),
-            DRM_PLATFORM_DEVICE_NAME_LEN);
-    fullname[DRM_PLATFORM_DEVICE_NAME_LEN - 1] = '\0';
-
-    return 0;
+    /* Like Linux without OF data: the name from the bus ID. */
+    return get_sysctl_platform_name(maj, min, fullname,
+                                    DRM_PLATFORM_DEVICE_NAME_LEN);
 #else
 #warning "Missing implementation of drmParseOFBusInfo"
     return -EINVAL;
