@@ -3476,6 +3476,11 @@ static char *drmGetMinorNameForFD(int fd, int type)
     snprintf(name, sizeof(name), DRM_DIR_NAME "/%s%d", mname,
          id + drmGetMinorBase(type));
 
+    /* Not every device has every node type, e.g. KMS-only drivers have no
+     * render node. Report the node only if it exists, as on Linux. */
+    if (stat(name, &sbuf) != 0)
+        return NULL;
+
     return strdup(name);
 #else
     struct stat sbuf;
