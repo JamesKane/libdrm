@@ -3606,38 +3606,15 @@ static int get_subsystem_type(const char *device_path)
 
 #ifdef __FreeBSD__
 /*
- * The hw.dri slot of the device of node "id" of the given type.  Kernels
- * that give each slot the numbers of its nodes are searched; for older ones,
- * guess that card N and renderD(128+N) are hw.dri.N.
+ * The bus ID the kernel gives the device of a node: dev.drm.N.busid for
+ * /dev/drm/N.  Older kernels only have hw.dri.M.busid, one per device, where
+ * card N and renderD(128+N) are guessed to be hw.dri.N.
  */
-static int get_sysctl_slot(int id, int type)
-{
-    char sysctl_name[32];
-    const char *leaf;
-    size_t len;
-    int i, node, found;
-
-    leaf = type == DRM_NODE_RENDER ? "render" : "primary";
-    found = 0;
-    for (i = 0; i < 10; i++) {
-        snprintf(sysctl_name, sizeof(sysctl_name), "hw.dri.%d.%s", i, leaf);
-        len = sizeof(node);
-        if (sysctlbyname(sysctl_name, &node, &len, NULL, 0) != 0)
-            continue;
-        if (node == id)
-            return i;
-        found = 1;
-    }
-    if (found)
-        return -1;
-    return type == DRM_NODE_RENDER ? id - 128 : id;
-}
-
-/* The bus ID the kernel gives the device of a node, from hw.dri.N.busid. */
 static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
 {
     char dname[SPECNAMELEN];
-    char sysctl_name[16];
+    char sysctl_name[32];
+    size_t size;
     int id, type;
     unsigned int rdev;
 
@@ -3647,17 +3624,22 @@ static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
 
     if (sscanf(dname, "drm/%d\n", &id) != 1)
         return -EINVAL;
-    type = drmGetMinorType(maj, min);
-    if (type == -1)
-        return -EINVAL;
 
-    id = get_sysctl_slot(id, type);
+    snprintf(sysctl_name, sizeof(sysctl_name), "dev.drm.%d.busid", id);
+    size = len;
+    if (sysctlbyname(sysctl_name, busid, &size, NULL, 0) == 0)
+        return 0;
+
+    type = drmGetMinorType(maj, min);
+    if (type == DRM_NODE_RENDER)
+        id -= 128;
+    else if (type != DRM_NODE_PRIMARY)
+        return -EINVAL;
     if (id < 0)
         return -EINVAL;
-
-    if (snprintf(sysctl_name, sizeof(sysctl_name), "hw.dri.%d.busid", id) <= 0)
-      return -EINVAL;
-    if (sysctlbyname(sysctl_name, busid, &len, NULL, 0))
+    snprintf(sysctl_name, sizeof(sysctl_name), "hw.dri.%d.busid", id);
+    size = len;
+    if (sysctlbyname(sysctl_name, busid, &size, NULL, 0))
       return -EINVAL;
 
     return 0;
