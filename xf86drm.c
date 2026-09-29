@@ -3605,6 +3605,34 @@ static int get_subsystem_type(const char *device_path)
 #endif
 
 #ifdef __FreeBSD__
+/*
+ * The hw.dri slot of the device of node "id" of the given type.  Kernels
+ * that give each slot the numbers of its nodes are searched; for older ones,
+ * guess that card N and renderD(128+N) are hw.dri.N.
+ */
+static int get_sysctl_slot(int id, int type)
+{
+    char sysctl_name[32];
+    const char *leaf;
+    size_t len;
+    int i, node, found;
+
+    leaf = type == DRM_NODE_RENDER ? "render" : "primary";
+    found = 0;
+    for (i = 0; i < 10; i++) {
+        snprintf(sysctl_name, sizeof(sysctl_name), "hw.dri.%d.%s", i, leaf);
+        len = sizeof(node);
+        if (sysctlbyname(sysctl_name, &node, &len, NULL, 0) != 0)
+            continue;
+        if (node == id)
+            return i;
+        found = 1;
+    }
+    if (found)
+        return -1;
+    return type == DRM_NODE_RENDER ? id - 128 : id;
+}
+
 /* The bus ID the kernel gives the device of a node, from hw.dri.N.busid. */
 static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
 {
@@ -3623,20 +3651,7 @@ static int get_sysctl_busid(int maj, int min, char *busid, size_t len)
     if (type == -1)
         return -EINVAL;
 
-    /* BUG: This above section is iffy, since it mandates that a driver will
-     * create both card and render node.
-     * If it does not, the next DRM device will create card#X and
-     * renderD#(128+X)-1.
-     * This is a possibility in FreeBSD but for now there is no good way for
-     * obtaining the info.
-     */
-    switch (type) {
-    case DRM_NODE_PRIMARY:
-         break;
-    case DRM_NODE_RENDER:
-         id -= 128;
-         break;
-    }
+    id = get_sysctl_slot(id, type);
     if (id < 0)
         return -EINVAL;
 
